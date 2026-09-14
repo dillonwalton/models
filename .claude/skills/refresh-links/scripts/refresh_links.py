@@ -17,14 +17,23 @@ Usage:
 Requires: openpyxl.  Set SEC_EDGAR_USER_AGENT to a contact email (SEC rejects
 requests without one).
 """
-import argparse, datetime, glob, gzip, json, os, re, sys, time, urllib.request
+import argparse, datetime, difflib, glob, gzip, json, os, re, sys, time, urllib.error, urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import xlsx_safe
 
 UA = os.environ.get("SEC_EDGAR_USER_AGENT", "").strip()
+CACHE_FILE = ".refresh_links_cache.json"
+INDEX_WORKBOOK = "Utilities.xlsx"
 
-# Model files that are not the SEC registrant of the same ticker, or not SEC
-# registrants at all. Keeps us from linking the wrong company's releases.
+# Tickers whose EDGAR entry is a different company, or that are not SEC
+# registrants. Verified against the index workbook at run time as well, but
+# these are recorded so the reason survives.
 SKIP = {
-    "H":     "Hydro One (TSX) -- EDGAR ticker 'H' is Hyatt Hotels, a different company",
+    "H":     "Hydro One (TSX) -- EDGAR ticker 'H' is Hyatt Hotels",
+    "DIA":   "Dialight plc (LSE) -- EDGAR ticker 'DIA' is the SPDR Dow Jones ETF",
+    "SUN":   "Stardust Solar (TSXV) -- EDGAR ticker 'SUN' is Sunoco LP",
+    "SPCX":  "SpaceX -- private; files no earnings releases",
     "CMNR":  "Commerce Energy Group -- last EDGAR filing 2009",
     "APTL":  "Alaska Power & Telephone -- last EDGAR filing 2005",
     "SUME":  "Summer Energy Holdings -- no EDGAR ticker mapping",
@@ -34,6 +43,9 @@ SKIP = {
 NOT_A_MODEL = {"Utilities.xlsx", "base model.xlsx"}
 
 ORD = {"first": 1, "second": 2, "third": 3, "fourth": 4}
+MONTHS = {m: i + 1 for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july",
+     "august", "september", "october", "november", "december"])}
 MONTH_END = {"march 31": 1, "june 30": 2, "september 30": 3, "december 31": 4}
 QUARTER_END = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
 # Exhibits filed alongside the release that are not the release itself. Matched
@@ -44,34 +56,97 @@ NOT_A_RELEASE = (r"management.{0,8}s discussion", r"unaudited condensed",
                  r"form 52-109", r"consent of independent")
 
 
+class Throttled(Exception):
+    """SEC is refusing requests. Fatal: blanks after this point are meaningless."""
+
+
+class FetchFailed(Exception):
+    """A request failed for a reason that is not a definitive 'absent'."""
+
+
 def fetch(url, cap=250000, tries=3):
+    """Return the body, or raise. Never returns '' to mean failure -- a caller
+    that cannot tell a throttle from an empty document will silently record
+    'no release exists' for an entire run."""
+    last = None
     for attempt in range(tries):
         try:
             req = urllib.request.Request(url, headers={
                 "User-Agent": UA, "Accept-Encoding": "gzip", "Range": "bytes=0-%d" % cap})
             with urllib.request.urlopen(req, timeout=60) as resp:
                 raw = resp.read()
-                try:
-                    raw = gzip.decompress(raw)
-                except Exception:
-                    pass
+                if resp.headers.get("Content-Encoding") == "gzip":
+                    try:
+                        raw = gzip.decompress(raw)
+                    except Exception:
+                        # A range-truncated gzip member cannot be decoded; decoding
+                        # the raw bytes would yield mojibake that fails every regex.
+                        raise FetchFailed("truncated gzip from %s" % url)
                 return raw.decode("utf-8", "replace")
-        except Exception:
-            if attempt == tries - 1:
-                return ""
-            time.sleep(1.0)
-        finally:
-            time.sleep(0.11)          # SEC allows 10 req/sec
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 429):
+                raise Throttled("SEC returned %d for %s -- stopping. Check "
+                                "SEC_EDGAR_USER_AGENT and back off." % (e.code, url))
+            if e.code == 404:
+                raise FetchFailed("404 %s" % url)
+            last = e
+        except Exception as e:
+            last = e
+        if attempt < tries - 1:
+            time.sleep(1.5 * (attempt + 1))          # backoff, not a flat retry
+        time.sleep(0.11)                              # SEC allows 10 req/sec
+    raise FetchFailed("%s after %d tries: %s" % (url, tries, last))
 
 
 def plain(html):
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
 
 
-def periods(text):
-    """Calendar (quarter, year) pairs the release claims to report."""
+def nearest_quarter(date):
+    """Calendar quarter whose end is nearest `date`.
+
+    This is how an off-cycle fiscal quarter is placed on calendar headers:
+    NVDA's quarter ending 3 May 2020 sits nearest 31 Mar, so it is Q1 2020.
+    """
+    best = None
+    for year in (date.year - 1, date.year, date.year + 1):
+        for q, (m, d) in QUARTER_END.items():
+            delta = abs((datetime.date(year, m, d) - date).days)
+            if best is None or delta < best[0]:
+                best = (delta, q, year)
+    return best[1], best[2]
+
+
+def _dates_in(text):
+    for m in re.finditer(r"(january|february|march|april|may|june|july|august|"
+                         r"september|october|november|december)\s+(\d{1,2}),?\s+(\d{4})", text):
+        try:
+            yield datetime.date(int(m.group(3)), MONTHS[m.group(1)], int(m.group(2)))
+        except ValueError:
+            continue
+
+
+def periods(text, calendar_filer=True):
+    """Calendar (quarter, year) pairs the release reports.
+
+    For a calendar-year filer the company's own quarter labels are the calendar
+    quarters. For an off-cycle filer they are not -- "first quarter fiscal 2021"
+    may be calendar Q1 2020 -- so only explicit period end dates are trusted,
+    mapped to the nearest calendar quarter.
+    """
     t = text.lower()
     found = set()
+
+    for m in re.finditer(r"(?:three|thirteen) months ended\s+([a-z]+\s+\d{1,2},?\s+\d{4})", t):
+        for d in _dates_in(m.group(1)):
+            found.add(nearest_quarter(d))
+    for m in re.finditer(r"quarter(?:ly period)? ended\s+([a-z]+\s+\d{1,2},?\s+\d{4})", t):
+        for d in _dates_in(m.group(1)):
+            found.add(nearest_quarter(d))
+
+    if not calendar_filer:
+        return found
+
     for m in re.finditer(r"(first|second|third|fourth)[- ]quarter(?:\s+(?:of\s+|ended\s+)?(\d{4}))?", t):
         if m.group(2):
             found.add((ORD[m.group(1)], int(m.group(2))))
@@ -81,31 +156,43 @@ def periods(text):
         found.add((MONTH_END[m.group(1)], int(m.group(2))))
     for m in re.finditer(r"(?:year|fourth quarter) ended december 31,? (\d{4})", t):
         found.add((4, int(m.group(1))))
-    # "fourth quarter and full year 2020" / "... and fiscal year 2020" -- the year
-    # does not sit directly after "quarter", so the patterns above miss it.
+    # "fourth quarter and full year 2020" -- the year does not sit directly
+    # after "quarter", so the patterns above miss it.
     for m in re.finditer(r"(first|second|third|fourth)[- ]quarter and (?:the )?"
                          r"(?:full[- ]|fiscal[- ])?year (?:ended [a-z]+ \d{1,2},? )?(\d{4})", t):
         found.add((ORD[m.group(1)], int(m.group(2))))
-    for m in re.finditer(r"q([1-4])\s+(\d{4})", t):                # "Q3 2025"
+    for m in re.finditer(r"q([1-4])\s+(\d{4})", t):
         found.add((int(m.group(1)), int(m.group(2))))
-    for m in re.finditer(r"(\d{4}) year[- ]end earnings", t):      # Xcel's phrasing
+    for m in re.finditer(r"(\d{4}) year[- ]end earnings", t):
         found.add((4, int(m.group(1))))
     return found
 
 
 def looks_like_release(text):
-    head = text.lower()[:400]
+    """Reject the MD&A, interim financials and certifications filed alongside.
+
+    Deliberately permissive on the positive side: small-cap and foreign
+    headlines say "Interim Report" or "Financial Results for...", not
+    "Reports". Period matching does the real work of picking the right one.
+    """
+    head = text.lower()[:600]
     if any(re.search(p, head) for p in NOT_A_RELEASE):
         return False
-    return bool(re.search(r"\b(reports|announces|releases)\b", head))
+    return bool(re.search(r"\b(reports?|announces|releases|results|earnings|"
+                          r"interim|financial)\b", head))
 
 
 def reporting_window(q, year):
-    """Calendar window in which quarter (q, year) is normally reported."""
-    return {1: ("%d-04-01" % year, "%d-06-30" % year),
-            2: ("%d-07-01" % year, "%d-09-30" % year),
-            3: ("%d-10-01" % year, "%d-12-31" % year),
-            4: ("%d-01-01" % (year + 1), "%d-03-31" % (year + 1))}[q]
+    """Calendar window in which quarter (q, year) may be reported.
+
+    Deliberately generous: a non-accelerated filer has 90 days for a 10-K and
+    routinely publishes full-year results in April. Overlap between windows is
+    harmless because the release text, not the date, decides the quarter.
+    """
+    return {1: ("%d-04-01" % year, "%d-07-31" % year),
+            2: ("%d-07-01" % year, "%d-10-31" % year),
+            3: ("%d-10-01" % year, "%d-01-31" % (year + 1)),
+            4: ("%d-01-01" % (year + 1), "%d-04-30" % (year + 1))}[q]
 
 
 def lag_days(q, year, filed):
@@ -114,16 +201,48 @@ def lag_days(q, year, filed):
     return (filed_on - datetime.date(year, month, day)).days
 
 
-def resolve_cik(ticker):
-    data = json.loads(fetch("https://www.sec.gov/files/company_tickers.json", cap=6000000))
-    for row in data.values():
-        if row["ticker"].upper() == ticker.upper():
-            return row["cik_str"], row["title"]
-    return None, None
+_TICKER_MAP = None
+
+
+def ticker_map():
+    global _TICKER_MAP
+    if _TICKER_MAP is None:                       # ~1.5MB; fetch once per run
+        data = json.loads(fetch("https://www.sec.gov/files/company_tickers.json", cap=6000000))
+        _TICKER_MAP = {row["ticker"].upper(): (row["cik_str"], row["title"])
+                       for row in data.values()}
+    return _TICKER_MAP
+
+
+def normalize_name(s):
+    s = re.sub(r"\(.*?\)", "", s).lower()
+    s = re.sub(r"\b(inc|corp|corporation|company|co|ltd|limited|plc|holdings|group|"
+               r"the|lp|sa|nv|ag|incorporated|technologies|energy|power)\b", "", s)
+    return re.sub(r"[^a-z0-9]", "", s)
+
+
+def names_match(sheet_name, edgar_name):
+    a, b = normalize_name(sheet_name), normalize_name(edgar_name)
+    if not a or not b:
+        return False
+    return a in b or b in a or difflib.SequenceMatcher(None, a, b).ratio() >= 0.6
+
+
+def index_companies():
+    """ticker -> company name, from the index workbook's Main sheet."""
+    import openpyxl
+    if not os.path.exists(INDEX_WORKBOOK):
+        return {}
+    ws = openpyxl.load_workbook(INDEX_WORKBOOK, read_only=True)["Main"]
+    out = {}
+    for row in ws.iter_rows(min_col=2, max_col=3, values_only=True):
+        company, ticker = row[0], row[1]
+        if company and ticker:
+            out[str(ticker).strip().upper()] = str(company)
+    return out
 
 
 def all_filings(cik):
-    sub = json.loads(fetch("https://data.sec.gov/submissions/CIK%010d.json" % cik, cap=8000000))
+    sub = json.loads(fetch("https://data.sec.gov/submissions/CIK%010d.json" % cik, cap=20000000))
     rows = []
 
     def absorb(block):
@@ -133,13 +252,17 @@ def all_filings(cik):
 
     absorb(sub["filings"]["recent"])
     for extra in sub["filings"].get("files", []):
-        absorb(json.loads(fetch("https://data.sec.gov/submissions/" + extra["name"], cap=8000000)))
+        # Older filings are paginated into separate files; these are already
+        # bare {field: [...]} blocks, not wrapped in "filings".
+        absorb(json.loads(fetch("https://data.sec.gov/submissions/" + extra["name"],
+                                cap=20000000)))
     return sub.get("fiscalYearEnd"), sub.get("name"), rows
 
 
 def exhibits(cik, accession):
     nodash = accession.replace("-", "")
-    html = fetch("https://www.sec.gov/Archives/edgar/data/%d/%s/%s-index.htm" % (cik, nodash, accession))
+    html = fetch("https://www.sec.gov/Archives/edgar/data/%d/%s/%s-index.htm"
+                 % (cik, nodash, accession))
     out = []
     for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S | re.I):
         cells = [re.sub(r"<[^>]+>", "", c).replace("&nbsp;", " ").strip()
@@ -151,8 +274,12 @@ def exhibits(cik, accession):
     return out
 
 
-def best_release(cik, filings, q, year):
-    """Best EX-99 release for calendar quarter (q, year), or None."""
+def best_release(cik, filings, q, year, calendar_filer=True):
+    """(best match or None, whether any lookup failed).
+
+    The second value matters: without it a network failure is indistinguishable
+    from a company that never reported, and gets cached as a permanent absence.
+    """
     low, high = reporting_window(q, year)
     candidates = [f for f in filings
                   if low <= f["filingDate"] <= high
@@ -160,13 +287,22 @@ def best_release(cik, filings, q, year):
     # Earnings 8-Ks are usually tagged 2.02, but not always -- some are filed
     # under 9.01 only, and some arrive as 8-K/A. Try the tagged ones first.
     candidates.sort(key=lambda f: ("2.02" not in (f["items"] or ""), f["filingDate"]))
-    scored = []
+    scored, had_error = [], False
     for f in candidates:
-        for ex in exhibits(cik, f["accessionNumber"]):
-            text = plain(fetch(ex["url"]))
+        try:
+            found = exhibits(cik, f["accessionNumber"])
+        except FetchFailed:
+            had_error = True
+            continue
+        for ex in found:
+            try:
+                text = plain(fetch(ex["url"]))
+            except FetchFailed:
+                had_error = True
+                continue
             if not looks_like_release(text):
                 continue
-            claimed = periods(text)
+            claimed = periods(text, calendar_filer)
             if (q, year) not in claimed:
                 continue
             # A real earnings release nearly always cites the prior-year quarter
@@ -174,46 +310,75 @@ def best_release(cik, filings, q, year):
             yoy = (q, year - 1) in claimed
             ideal = 55 if q == 4 else 40
             scored.append({
-                "score": (100 if yoy else 0) - abs(lag_days(q, year, f["filingDate"]) - ideal) * 0.5,
+                "score": (100 if yoy else 0) - abs(lag_days(q, year, f["filingDate"]) - ideal) * 0.2,
                 "url": ex["url"], "filed": f["filingDate"], "form": f["form"], "yoy": yoy})
             break
     scored.sort(key=lambda c: -c["score"])
-    return scored[0] if scored else None
+    return (scored[0] if scored else None), had_error
 
 
 def quarters_through_today(start_year):
-    """Every quarter from start_year that has actually closed."""
-    today = datetime.date.today()
+    """Every quarter from start_year that has closed and had time to be reported."""
+    cutoff = datetime.date.today() - datetime.timedelta(days=25)
     out = []
-    for year in range(start_year, today.year + 1):
+    for year in range(start_year, datetime.date.today().year + 1):
         for q in (1, 2, 3, 4):
             month, day = QUARTER_END[q]
-            if datetime.date(year, month, day) < today:
+            if datetime.date(year, month, day) < cutoff:
                 out.append((q, year))
     return out
 
 
-def refresh(ticker, dry_run=False, rebuild=False):
+def load_cache(ignore=False):
+    if ignore or not os.path.exists(CACHE_FILE):
+        return {}
+    try:
+        return json.load(open(CACHE_FILE))
+    except Exception:
+        return {}
+
+
+def save_cache(cache):
+    tmp = CACHE_FILE + ".tmp"
+    json.dump(cache, open(tmp, "w"), indent=0)
+    os.replace(tmp, CACHE_FILE)
+
+
+def file_to_ticker(stem, known):
+    """Model filenames sanitize dots: BEP_UN.xlsx is ticker BEP.UN."""
+    if stem.upper() in known or "_" not in stem:
+        return stem.upper()
+    dotted = stem.replace("_", ".").upper()
+    return dotted if dotted in known else stem.upper()
+
+
+def refresh(stem, companies, cache, dry_run=False, rebuild=False):
     import openpyxl
     from openpyxl.styles import Font
 
-    path = "%s.xlsx" % ticker
+    path = "%s.xlsx" % stem
     if not os.path.exists(path):
-        print("  %s: no model file" % ticker)
-        return 0
+        print("  %s: no model file" % stem); return 0, 0
+    ticker = file_to_ticker(stem, companies)
     if ticker in SKIP:
-        print("  %s: skipped -- %s" % (ticker, SKIP[ticker]))
-        return 0
+        print("  %s: skipped -- %s" % (ticker, SKIP[ticker])); return 0, 0
 
-    cik, _ = resolve_cik(ticker)
-    if not cik:
-        print("  %s: no EDGAR ticker match; add to SKIP if not SEC-registered" % ticker)
-        return 0
+    tmap = ticker_map()
+    if ticker not in tmap:
+        print("  %s: not SEC-registered (no EDGAR ticker)" % ticker); return 0, 0
+    cik, edgar_name = tmap[ticker]
 
-    fye, edgar_name, filings = all_filings(cik)
-    if fye and fye != "1231":
-        print("  %s: WARNING fiscal year ends %s, not 12-31. This script maps CALENDAR "
-              "quarters; review the results before trusting them." % (ticker, fye))
+    # Guard against ticker collisions -- EDGAR's 'H' is Hyatt, not Hydro One.
+    expected = companies.get(ticker)
+    if expected and not names_match(expected, edgar_name):
+        print("  %s: REFUSED -- sheet says %r, EDGAR ticker is %r"
+              % (ticker, expected[:40], edgar_name[:40]))
+        return 0, 0
+
+    fye, _, filings = all_filings(cik)
+    calendar_filer = (fye or "1231") == "1231"
+    if not calendar_filer:
+        print("  %s: fiscal year ends %s -- calendarizing by period end date" % (ticker, fye))
 
     wb = openpyxl.load_workbook(path)
     ws = wb["Model"]
@@ -222,37 +387,48 @@ def refresh(ticker, dry_run=False, rebuild=False):
         cell = ws.cell(row=2, column=col)
         if cell.value and re.fullmatch(r"Q[1-4]\d{2}", str(cell.value).strip()):
             headers[str(cell.value).strip()] = cell
-
     if not headers:
-        print("  %s: no quarter headers found on the Model sheet row 2" % ticker)
-        return 0
-    # Follow whatever range the model itself covers rather than assuming one.
+        print("  %s: no quarter headers on Model row 2" % ticker); return 0, 0
     start_year = min(2000 + int(lbl[2:]) for lbl in headers)
 
-    written = 0
+    written = errors = 0
+    pending = False
     for q, year in quarters_through_today(start_year):
         label = "Q%d%s" % (q, str(year)[2:])
         cell = headers.get(label)
         if cell is None or (cell.hyperlink and not rebuild):
             continue
-        hit = best_release(cik, filings, q, year)
-        if not hit:
-            print("    %s %s: no release found" % (ticker, label))
+        key = "%s|%s" % (ticker, label)
+        if cache.get(key) == "none" and not rebuild:
             continue
-        flag = "" if hit["yoy"] else "  (no prior-year comparison in text -- verify)"
+        hit, had_error = best_release(cik, filings, q, year, calendar_filer)
+        if not hit:
+            if had_error:
+                print("    %s %s: LOOKUP ERROR (not recorded as absent)" % (ticker, label))
+                errors += 1
+            else:
+                cache[key] = "none"
+            continue
+        flag = "" if hit["yoy"] else "  (no prior-year comparison -- verify)"
         print("    %s %s: %s %s %s%s" % (ticker, label, hit["filed"], hit["form"],
                                          hit["url"].split("/")[-1], flag))
         if not dry_run:
             cell.hyperlink = hit["url"]
             f = cell.font
             cell.font = Font(name=f.name, sz=f.sz, b=f.b, i=f.i, u="single", color="FF0563C1")
+            pending = True
         written += 1
+        # Save as we go: a multi-hour run will be interrupted, and saving only
+        # at the end would discard every link found for this company.
+        if pending and written % 4 == 0:
+            xlsx_safe.save_workbook(wb, path); pending = False
 
-    if written and not dry_run:
-        wb.save(path)
-    print("  %s (%s): %d link(s) %s" % (ticker, edgar_name, written,
-                                        "found" if dry_run else "written"))
-    return written
+    if pending and not dry_run:
+        xlsx_safe.save_workbook(wb, path)
+    print("  %s (%s): %d link(s) %s%s"
+          % (ticker, edgar_name[:38], written, "found" if dry_run else "written",
+             ", %d lookup error(s)" % errors if errors else ""))
+    return written, errors
 
 
 def main():
@@ -262,22 +438,47 @@ def main():
     ap.add_argument("--all", action="store_true", help="every model in the repo")
     ap.add_argument("--dry-run", action="store_true", help="report without writing")
     ap.add_argument("--rebuild", action="store_true", help="replace links already present")
+    ap.add_argument("--ignore-cache", action="store_true", help="re-search known-empty quarters")
     args = ap.parse_args()
 
     if not UA or "@" not in UA:
         sys.exit("Set SEC_EDGAR_USER_AGENT to a contact email -- SEC returns 403 without one.")
 
-    tickers = args.tickers
+    stems = args.tickers
     if args.all:
-        tickers = sorted(os.path.basename(p)[:-5] for p in glob.glob("*.xlsx")
-                         if os.path.basename(p) not in NOT_A_MODEL
-                         and not os.path.basename(p).startswith("~$"))
-    if not tickers:
+        stems = sorted(os.path.basename(p)[:-5] for p in glob.glob("*.xlsx")
+                       if os.path.basename(p) not in NOT_A_MODEL
+                       and not os.path.basename(p).startswith("~$"))
+    if not stems:
         ap.error("give one or more tickers, or --all")
 
-    total = sum(refresh(t, args.dry_run, args.rebuild) for t in tickers)
+    companies = index_companies()
+    cache = load_cache(args.ignore_cache)
+    total = total_err = failed = 0
+    try:
+        for i, stem in enumerate(stems, 1):
+            print("[%d/%d]" % (i, len(stems)), flush=True)
+            try:
+                n, e = refresh(stem, companies, cache, args.dry_run, args.rebuild)
+                total += n; total_err += e
+            except Throttled:
+                raise
+            except Exception as exc:              # one bad company must not end the run
+                failed += 1
+                print("  %s: FAILED -- %s" % (stem, exc))
+            if not args.dry_run:
+                save_cache(cache)
+    except Throttled as t:
+        save_cache(cache)
+        sys.exit("\nABORTED: %s\nLinks written so far are saved; re-run to resume." % t)
+
+    if not args.dry_run:
+        save_cache(cache)
     print("\n%d link(s) %s across %d model(s)" % (total, "found" if args.dry_run else "written",
-                                                  len(tickers)))
+                                                  len(stems)))
+    if total_err or failed:
+        print("%d lookup error(s), %d model(s) failed -- those quarters are NOT "
+              "recorded as empty; re-run to retry." % (total_err, failed))
 
 
 if __name__ == "__main__":
