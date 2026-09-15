@@ -424,20 +424,24 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False):
 
     wb = openpyxl.load_workbook(path)
     ws = wb["Model"]
+    # Headers are written either Q120 or Q12024 depending on the model's
+    # vintage, so key on the parsed quarter rather than the label text.
     headers = {}
     for col in range(1, ws.max_column + 1):
         cell = ws.cell(row=2, column=col)
-        if cell.value and re.fullmatch(r"Q[1-4]\d{2}", str(cell.value).strip()):
-            headers[str(cell.value).strip()] = cell
+        m = re.fullmatch(r"Q([1-4])(\d{2}|\d{4})", str(cell.value).strip()) if cell.value else None
+        if m:
+            year = int(m.group(2))
+            headers[(int(m.group(1)), year + 2000 if year < 100 else year)] = cell
     if not headers:
         print("  %s: no quarter headers on Model row 2" % ticker); return 0, 0
-    start_year = min(2000 + int(lbl[2:]) for lbl in headers)
+    start_year = min(y for _, y in headers)
 
     written = errors = 0
     pending = False
     for q, year in quarters_through_today(start_year):
         label = "Q%d%s" % (q, str(year)[2:])
-        cell = headers.get(label)
+        cell = headers.get((q, year))
         if cell is None or (cell.hyperlink and not rebuild):
             continue
         key = "%s|%s" % (ticker, label)

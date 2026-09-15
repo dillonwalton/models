@@ -2,3 +2,5 @@
 ~$*
 __pycache__/
 .refresh_links_cache.json
+*.log
+coverage.json
