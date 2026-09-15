@@ -149,7 +149,24 @@ def _dates_in(text):
             continue
 
 
-def periods(text, calendar_filer=True):
+def fiscal_period_end(fye, n, fiscal_year):
+    """End date of fiscal quarter `n` of `fiscal_year`, from a MMDD year end.
+
+    Cisco's releases carry no period end dates at all -- only "third quarter of
+    fiscal 2020" -- so the date has to be derived from the fiscal calendar.
+    Q4 ends at the fiscal year end and each earlier quarter three months before.
+    """
+    import calendar
+    month, day = int(fye[:2]), int(fye[2:])
+    month -= (4 - n) * 3
+    year = fiscal_year
+    while month <= 0:
+        month += 12
+        year -= 1
+    return datetime.date(year, month, min(day, calendar.monthrange(year, month)[1]))
+
+
+def periods(text, calendar_filer=True, fye=None):
     """Calendar (quarter, year) pairs the release reports.
 
     For a calendar-year filer the company's own quarter labels are the calendar
@@ -168,6 +185,20 @@ def periods(text, calendar_filer=True):
             found.add(nearest_quarter(d))
 
     if not calendar_filer:
+        # Off-cycle filers often state only a fiscal label. Convert it via the
+        # fiscal calendar; the prior-year label these releases also carry is
+        # what supplies the year-over-year signal.
+        if fye:
+            for m in re.finditer(r"(first|second|third|fourth) quarter (?:of |ended )?"
+                                 r"fiscal(?: year)? (\d{4})", t):
+                found.add(nearest_quarter(fiscal_period_end(fye, ORD[m.group(1)],
+                                                            int(m.group(2)))))
+            for m in re.finditer(r"\bq([1-4]) fy ?(\d{4})", t):
+                found.add(nearest_quarter(fiscal_period_end(fye, int(m.group(1)),
+                                                            int(m.group(2)))))
+            for m in re.finditer(r"fiscal(?: year)? (\d{4}) (first|second|third|fourth) quarter", t):
+                found.add(nearest_quarter(fiscal_period_end(fye, ORD[m.group(2)],
+                                                            int(m.group(1)))))
         return found
 
     for m in re.finditer(r"(first|second|third|fourth)[- ]quarter(?:\s+(?:of\s+|ended\s+)?(\d{4}))?", t):
@@ -316,7 +347,7 @@ def exhibits(cik, accession):
     return out
 
 
-def best_release(cik, filings, q, year, calendar_filer=True):
+def best_release(cik, filings, q, year, calendar_filer=True, fye=None):
     """(best match or None, whether any lookup failed).
 
     The second value matters: without it a network failure is indistinguishable
@@ -344,7 +375,7 @@ def best_release(cik, filings, q, year, calendar_filer=True):
                 continue
             if not looks_like_release(text):
                 continue
-            claimed = periods(text, calendar_filer)
+            claimed = periods(text, calendar_filer, fye)
             if (q, year) not in claimed:
                 continue
             # A real earnings release nearly always cites the prior-year quarter
@@ -447,7 +478,7 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False):
         key = "%s|%s" % (ticker, label)
         if cache.get(key) == "none" and not rebuild:
             continue
-        hit, had_error = best_release(cik, filings, q, year, calendar_filer)
+        hit, had_error = best_release(cik, filings, q, year, calendar_filer, fye)
         if not hit:
             if had_error:
                 print("    %s %s: LOOKUP ERROR (not recorded as absent)" % (ticker, label))

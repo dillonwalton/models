@@ -19,6 +19,15 @@ import zipfile
 
 # Dropped on purpose by openpyxl; restoring these would corrupt the file.
 EXPECTED_TO_CHANGE = ("xl/sharedStrings.xml", "xl/calcChain.xml")
+# openpyxl models cell comments and re-emits them under its own part names
+# (xl/comments/comment1.xml, xl/drawings/commentsDrawing1.vml). The originals
+# therefore only *look* missing -- restoring them leaves two competing comment
+# representations, with the originals orphaned and their content types
+# duplicated. Match by shape so any numbering is covered.
+REEMITTED = (re.compile(r"^xl/comments\d*\.xml$"),
+             re.compile(r"^xl/comments/comment\d*\.xml$"),
+             re.compile(r"^xl/drawings/vmlDrawing\d*\.vml$"),
+             re.compile(r"^xl/drawings/commentsDrawing\d*\.vml$"))
 
 CONTENT_TYPES = {
     ".xml":  "application/vnd.openxmlformats-officedocument.drawing+xml",
@@ -98,8 +107,10 @@ def restore_parts(original, rebuilt):
         owners = _drawing_owners(src)
         with zipfile.ZipFile(rebuilt) as dst:
             dst_names = set(dst.namelist())
+        reemitted = any(p.match(n) for n in dst_names for p in REEMITTED)
         missing = sorted(n for n in src_names - dst_names
-                         if n not in EXPECTED_TO_CHANGE and not n.endswith("/"))
+                         if n not in EXPECTED_TO_CHANGE and not n.endswith("/")
+                         and not (reemitted and any(p.match(n) for p in REEMITTED)))
         if not missing:
             return []
 
