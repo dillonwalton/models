@@ -54,6 +54,29 @@ QUARTER_END = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
 NOT_A_RELEASE = (r"management.{0,8}s discussion", r"unaudited condensed",
                  r"certification of interim", r"earnings coverage ratio",
                  r"form 52-109", r"consent of independent")
+# Filed under Item 2.02 but not the quarterly results: segment restatements,
+# call advisories, dividend declarations, offering notices. These mention the
+# quarter and would otherwise score as a release -- Rockwell's "Provides
+# Historical Data for new Operating Segments" is a real example that was
+# picked for Q320 before this filter existed.
+NOT_QUARTERLY_RESULTS = (r"provides historical data",
+                         r"\bto announce\b",
+                         r"schedules?\b[^.]{0,40}\b(call|conference)",
+                         r"announces change", r"declares[^.]{0,30}dividend",
+                         r"pricing of", r"prices[^.]{0,30}offering",
+                         r"commences[^.]{0,30}offering")
+# Headline language that does mark a results document. "Shareholder letter" is
+# included because it is how Oklo, Bloom and other recent listings publish
+# quarterly results.
+IS_RESULTS = (r"financial results", r"results for", r"\bresults\b", r"earnings",
+              r"shareholder letter", r"interim report", r"quarterly report",
+              r"half[- ]year", r"year[- ]end")
+# An unmistakable results headline. A release may also announce something else
+# in the same breath -- Rockwell's Q3 FY20 reports results AND announces new
+# operating segments -- so a strong headline outranks the soft disqualifiers.
+STRONG_RESULTS = (r"reports[^.]{0,80}results", r"reports[^.]{0,60}earnings",
+                  r"announces[^.]{0,60}financial results", r"shareholder letter",
+                  r"year[- ]end earnings", r"interim report")
 
 
 class Throttled(Exception):
@@ -163,6 +186,12 @@ def periods(text, calendar_filer=True):
         found.add((ORD[m.group(1)], int(m.group(2))))
     for m in re.finditer(r"q([1-4])\s+(\d{4})", t):
         found.add((int(m.group(1)), int(m.group(2))))
+    # "Vistra Reports Full-Year 2023 Results" -- a Q4 release that never says
+    # "fourth quarter". Scoped to the headline verb so that "full-year 2024
+    # guidance" inside a Q1 release does not register as Q4.
+    for m in re.finditer(r"(?:reports|announces|delivers)[^.]{0,40}full[- ]year "
+                         r"(\d{4})\s+(?:results|earnings|financial)", t):
+        found.add((4, int(m.group(1))))
     for m in re.finditer(r"(\d{4}) year[- ]end earnings", t):
         found.add((4, int(m.group(1))))
     return found
@@ -175,11 +204,24 @@ def looks_like_release(text):
     headlines say "Interim Report" or "Financial Results for...", not
     "Reports". Period matching does the real work of picking the right one.
     """
-    head = text.lower()[:600]
+    # Disqualifiers are judged on the headline region only, so an incidental
+    # later mention does not reject a real release. The positive test scans
+    # further in: letterhead and address blocks routinely push the headline
+    # past 600 characters (Rockwell's releases open with a Milwaukee address).
+    head = text.lower()[:800]
+    body = text.lower()[:3000]
     if any(re.search(p, head) for p in NOT_A_RELEASE):
         return False
-    return bool(re.search(r"\b(reports?|announces|releases|results|earnings|"
-                          r"interim|financial)\b", head))
+    if any(re.search(p, head) for p in STRONG_RESULTS):
+        return True
+    if any(re.search(p, head) for p in NOT_QUARTERLY_RESULTS):
+        return False
+    # A call advisory announces a future release: short, no financial tables.
+    # The real release says "will host a conference call" too, so the verb
+    # alone cannot separate them -- length does.
+    if len(text) < 3000 and re.search(r"will (announce|report)|conference call|webcast", head):
+        return False
+    return any(re.search(p, body) for p in IS_RESULTS)
 
 
 def reporting_window(q, year):
