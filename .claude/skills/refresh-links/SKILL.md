@@ -184,6 +184,9 @@ For those models, work through Excel instead:
 - `apply_links.ps1 -Ticker TICKER -JsonPath out.json` — applies them in Excel.
 - `extend_quarters.ps1 -Ticker TICKER -FirstQuarter N -FirstYear YYYY` — inserts
   historical quarter columns.
+- `extend_years.ps1 -Ticker TICKER -FirstYear YYYY` — inserts historical columns
+  into the annual block. Run it *after* `extend_quarters.ps1`, since the annual
+  block sits to the right of the quarters and shifts when they are inserted.
 
 Excel must do the column insert regardless of the comment problem, because it
 re-points every formula: a 35-column shift turned `=861-H3` into `=861-AQ3`.
