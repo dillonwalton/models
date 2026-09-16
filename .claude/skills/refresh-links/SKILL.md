@@ -28,6 +28,7 @@ Run from the repo root. Needs `openpyxl` (`py -3.14 -m pip install openpyxl`).
 | `--dry-run` | Reports without writing. Use first on anything unfamiliar. |
 | `--rebuild` | Re-evaluates quarters that already have links. Where no replacement is found the existing link is **kept**, so a rebuild cannot lose coverage. |
 | `--ignore-cache` | Retries quarters previously recorded as empty. Use after changing the matching logic. |
+| `--fallback-periodic` | Where no earnings release exists, links the 10-Q/10-K covering that period instead. See below. |
 
 Quarters found to have no release are cached in `.refresh_links_cache.json`
 (gitignored) so the companies that yield nothing are not re-searched at full
@@ -115,6 +116,54 @@ Each of these caused a real wrong or missing link before it was fixed.
   non-accelerated filer has 90 days for a 10-K. Overlap is harmless — the text
   decides the quarter, not the date.
 
+## Reaching quarters older than EDGAR's press releases
+
+Earnings releases reached EDGAR only because of two rule changes: Regulation FD
+(October 2000) pushed companies to file the release rather than just wire it,
+and the August 2004 Form 8-K overhaul created Item 2.02. Before that there was
+no obligation and most companies filed nothing, which is why NVIDIA's earliest
+release is Q102 despite a January 1999 IPO. Nothing is missing — nothing was
+required.
+
+The **periodic report was always required**, so `--fallback-periodic` links the
+10-Q, or the 10-K for a fiscal year end, covering any quarter with no release.
+This is how analysts normally carry a model back past the release era: the
+quarterly figures live in the primary filing, and the release is a convenience
+layered on top.
+
+The mapping is more reliable than release matching, not less — EDGAR reports
+the period end date directly, so the quarter is read off rather than inferred
+from text. No scoring is involved.
+
+Periodic links are styled **purple and italic** (`FF7030A0`) against the blue
+of a press release, so a model never implies a release where there is only a
+filing. Report them as periodic reports when summarising.
+
+Two EDGAR quirks are handled: filings before about 2000 name no
+`primaryDocument`, and some 2000-era ones name a file EDGAR does not actually
+serve (NVIDIA's 2000 10-Qs claim `0001.txt`, which 404s). Constructed document
+URLs are HEAD-checked and fall back to the filing index page, which always
+resolves.
+
+Other routes when a link is not enough, roughly in order of usefulness:
+
+- **Selected Quarterly Financial Data**, Item 302(a) of Regulation S-K — older
+  10-Ks carry an unaudited eight-quarter table, so one filing backfills two
+  years. The SEC removed the requirement in early 2021, so it exists for
+  precisely the older years where it is needed.
+- **Data vendors** (Capital IQ, FactSet, Bloomberg, LSEG) for normalised
+  series. CapIQ calendarises off-cycle filers with the same nearest-quarter-end
+  convention used here, so the two line up.
+- **News archives** (Factiva, Nexis, ProQuest, PR Newswire and Business Wire)
+  when the release text itself matters, or the Wayback Machine against the
+  company's old IR page.
+
+Watch comparability, not just availability: restatements, ASC 606 and ASC 842,
+segment redefinitions and acquisitions all break continuity. NVIDIA restated
+fiscal 2000–2002, which is why those quarters have no clean release at all. A
+link to the original filing preserves provenance in a way a vendor's restated
+figure does not.
+
 ## Ticker collisions
 
 The resolved EDGAR company name is compared against the company name on the
@@ -187,8 +236,9 @@ wrong link is worse than a blank. Established blanks in this repo:
 - **EXC Q421** — no Q4 2021 earnings 8-K exists; results went into the 10-K
   around the Constellation separation.
 - **Pre-2003 quarters generally.** EDGAR 8-Ks start around 2000 and Item 2.02
-  only exists from August 2004. NVDA's earliest release is Q102, and Q498–Q401
-  are blank despite the 1999 IPO because nothing was filed as a release.
+  only exists from August 2004. NVDA's earliest release is Q102. Those quarters
+  are reachable with `--fallback-periodic`, which links the 10-Q/10-K instead —
+  NVDA now runs Q498 to Q226 with only unreported quarters blank.
 - **Quarters not yet reported.** Quarters closing within the last 25 days are
   skipped rather than searched.
 

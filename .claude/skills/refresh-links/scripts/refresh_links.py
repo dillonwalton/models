@@ -329,7 +329,8 @@ def all_filings(cik):
     def absorb(block):
         for i in range(len(block["accessionNumber"])):
             rows.append({k: block[k][i] for k in
-                         ("accessionNumber", "filingDate", "form", "items")})
+                         ("accessionNumber", "filingDate", "form", "items",
+                          "reportDate", "primaryDocument")})
 
     absorb(sub["filings"]["recent"])
     for extra in sub["filings"].get("files", []):
@@ -404,6 +405,68 @@ def best_release(cik, filings, q, year, calendar_filer=True, fye=None):
     return (scored[0] if scored else None), had_error
 
 
+PERIODIC_FORMS = ("10-Q", "10-K", "10-K405", "10-KSB", "10-QSB", "20-F", "40-F")
+
+
+def url_ok(url):
+    """HEAD a URL. EDGAR names a primaryDocument for some 2000-era filings that
+    it does not actually serve, so a constructed document URL has to be checked
+    before it goes into a model."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA}, method="HEAD")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status == 200
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 429):
+            raise Throttled("SEC returned %d for %s" % (e.code, url))
+        return False
+    except Exception:
+        return False
+    finally:
+        time.sleep(0.11)
+
+
+def best_periodic(cik, filings, q, year):
+    """The 10-Q (or 10-K for a fiscal year end) covering calendar quarter (q, year).
+
+    Used only where no earnings release exists. Earnings releases reached EDGAR
+    only after Reg FD (2000) and Item 2.02 (2004); the periodic report was
+    always required, so it is the primary source for older quarters.
+
+    No text matching is involved: EDGAR reports the period end date directly, so
+    the quarter is read off rather than inferred.
+    """
+    best = None
+    for f in filings:
+        base = f["form"].split("/")[0]
+        if base not in PERIODIC_FORMS or not f.get("reportDate"):
+            continue
+        try:
+            end = datetime.date(*map(int, f["reportDate"].split("-")))
+        except Exception:
+            continue
+        if nearest_quarter(end) != (q, year):
+            continue
+        # Prefer the original filing over an amendment, then the earlier one.
+        rank = (f["form"].endswith("/A"), f["filingDate"])
+        if best is None or rank < best[0]:
+            nodash = f["accessionNumber"].replace("-", "")
+            doc = f.get("primaryDocument")
+            index_url = ("https://www.sec.gov/Archives/edgar/data/%d/%s/%s-index.htm"
+                         % (cik, nodash, f["accessionNumber"]))
+            # Filings before ~2000 name no primaryDocument, and some 2000-era
+            # ones name a file EDGAR does not serve. The index page always
+            # resolves, so it is the fallback in both cases.
+            url = index_url
+            if doc:
+                doc_url = "https://www.sec.gov/Archives/edgar/data/%d/%s/%s" % (cik, nodash, doc)
+                if url_ok(doc_url):
+                    url = doc_url
+            best = (rank, {"url": url, "filed": f["filingDate"], "form": f["form"],
+                           "period": f["reportDate"], "periodic": True})
+    return best[1] if best else None
+
+
 def quarters_through_today(start_year):
     """Every quarter from start_year that has closed and had time to be reported."""
     cutoff = datetime.date.today() - datetime.timedelta(days=25)
@@ -439,7 +502,7 @@ def file_to_ticker(stem, known):
     return dotted if dotted in known else stem.upper()
 
 
-def refresh(stem, companies, cache, dry_run=False, rebuild=False):
+def refresh(stem, companies, cache, dry_run=False, rebuild=False, fallback_periodic=False):
     import openpyxl
     from openpyxl.styles import Font
 
@@ -484,7 +547,7 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False):
         print("  %s: no quarter headers on Model row 2" % ticker); return 0, 0
     start_year = min(y for _, y in headers)
 
-    written = errors = 0
+    written = errors = periodic = 0
     pending = False
     for q, year in quarters_through_today(start_year):
         label = "Q%d%s" % (q, str(year)[2:])
@@ -495,6 +558,8 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False):
         if cache.get(key) == "none" and not rebuild:
             continue
         hit, had_error = best_release(cik, filings, q, year, calendar_filer, fye)
+        if not hit and fallback_periodic and not had_error:
+            hit = best_periodic(cik, filings, q, year)
         if not hit:
             if had_error:
                 print("    %s %s: LOOKUP ERROR (not recorded as absent)" % (ticker, label))
@@ -502,13 +567,24 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False):
             else:
                 cache[key] = "none"
             continue
-        flag = "" if hit["yoy"] else "  (no prior-year comparison -- verify)"
+        if hit.get("periodic"):
+            flag = "  [periodic report, period ended %s]" % hit["period"]
+            periodic += 1
+        else:
+            flag = "" if hit["yoy"] else "  (no prior-year comparison -- verify)"
         print("    %s %s: %s %s %s%s" % (ticker, label, hit["filed"], hit["form"],
                                          hit["url"].split("/")[-1], flag))
         if not dry_run:
             cell.hyperlink = hit["url"]
             f = cell.font
-            cell.font = Font(name=f.name, sz=f.sz, b=f.b, i=f.i, u="single", color="FF0563C1")
+            # Periodic-report links are styled differently so the model never
+            # implies a press release where there is only a filing.
+            if hit.get("periodic"):
+                cell.font = Font(name=f.name, sz=f.sz, b=f.b, i=True, u="single",
+                                 color="FF7030A0")
+            else:
+                cell.font = Font(name=f.name, sz=f.sz, b=f.b, i=f.i, u="single",
+                                 color="FF0563C1")
             pending = True
         written += 1
         # Save as we go: a multi-hour run will be interrupted, and saving only
@@ -518,8 +594,9 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False):
 
     if pending and not dry_run:
         xlsx_safe.save_workbook(wb, path)
-    print("  %s (%s): %d link(s) %s%s"
+    print("  %s (%s): %d link(s) %s%s%s"
           % (ticker, edgar_name[:38], written, "found" if dry_run else "written",
+             " (%d periodic)" % periodic if periodic else "",
              ", %d lookup error(s)" % errors if errors else ""))
     return written, errors
 
@@ -532,6 +609,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report without writing")
     ap.add_argument("--rebuild", action="store_true", help="replace links already present")
     ap.add_argument("--ignore-cache", action="store_true", help="re-search known-empty quarters")
+    ap.add_argument("--fallback-periodic", action="store_true",
+                    help="where no earnings release exists, link the 10-Q/10-K covering "
+                         "that period instead (styled differently)")
     args = ap.parse_args()
 
     if not UA or "@" not in UA:
@@ -552,7 +632,8 @@ def main():
         for i, stem in enumerate(stems, 1):
             print("[%d/%d]" % (i, len(stems)), flush=True)
             try:
-                n, e = refresh(stem, companies, cache, args.dry_run, args.rebuild)
+                n, e = refresh(stem, companies, cache, args.dry_run, args.rebuild,
+                               args.fallback_periodic)
                 total += n; total_err += e
             except Throttled:
                 raise
