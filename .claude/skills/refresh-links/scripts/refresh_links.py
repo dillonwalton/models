@@ -105,7 +105,8 @@ def fetch(url, cap=250000, tries=3):
     that cannot tell a throttle from an empty document will silently record
     'no release exists' for an entire run."""
     last = None
-    for attempt in range(tries):
+    throttle_hits = 0
+    for attempt in range(tries + 6):        # 429 waits do not consume retries
         try:
             req = urllib.request.Request(url, headers={
                 "User-Agent": UA, "Accept-Encoding": "gzip", "Range": "bytes=0-%d" % cap})
@@ -128,19 +129,25 @@ def fetch(url, cap=250000, tries=3):
                 # stated 10/sec, so wait it out rather than ending the run;
                 # give up only if it persists, since blanks after a throttle
                 # would be meaningless.
-                if attempt == tries - 1:
-                    raise Throttled("SEC still rate-limiting after %d attempts (%s). "
-                                    "Wait and re-run; work so far is saved." % (tries, url))
-                wait = float(e.headers.get("Retry-After") or 0) or 10.0 * (3 ** attempt)
-                time.sleep(min(wait, 120))
+                throttle_hits += 1
+                if throttle_hits >= 6:
+                    raise Throttled("SEC still rate-limiting after %d waits (%s). "
+                                    "Leave it 15-30 minutes; work so far is saved."
+                                    % (throttle_hits, url))
+                # A block can outlast a short backoff by minutes, so be patient:
+                # 15s, 45s, 135s, then capped. Re-running immediately just
+                # extends the penalty.
+                wait = float(e.headers.get("Retry-After") or 0) or 15.0 * (3 ** min(attempt, 3))
+                time.sleep(min(wait, 300))
                 continue
             if e.code == 404:
                 raise FetchFailed("404 %s" % url)
             last = e
         except Exception as e:
             last = e
-        if attempt < tries - 1:
-            time.sleep(1.5 * (attempt + 1))          # backoff, not a flat retry
+        if attempt >= tries - 1:
+            break
+        time.sleep(1.5 * (attempt + 1))              # backoff, not a flat retry
         time.sleep(REQUEST_INTERVAL)
     raise FetchFailed("%s after %d tries: %s" % (url, tries, last))
 
