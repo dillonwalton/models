@@ -33,7 +33,10 @@ SKIP = {
     "H":     "Hydro One (TSX) -- EDGAR ticker 'H' is Hyatt Hotels",
     "DIA":   "Dialight plc (LSE) -- EDGAR ticker 'DIA' is the SPDR Dow Jones ETF",
     "SUN":   "Stardust Solar (TSXV) -- EDGAR ticker 'SUN' is Sunoco LP",
-    "SPCX":  "SpaceX -- private; files no earnings releases",
+    # SPCX was private and correctly skipped until June 2026, when SpaceX
+    # listed (424B4 12 Jun 2026) and began reporting. Its first public quarter
+    # is Q226. A SKIP entry is a claim about the world that can expire -- check
+    # before trusting one.
     "CMNR":  "Commerce Energy Group -- last EDGAR filing 2009",
     "APTL":  "Alaska Power & Telephone -- last EDGAR filing 2005",
     "SUME":  "Summer Energy Holdings -- no EDGAR ticker mapping",
@@ -41,6 +44,13 @@ SKIP = {
     "SBGSY": "Schneider Electric ADR -- files in France, not with the SEC",
 }
 NOT_A_MODEL = {"Utilities.xlsx", "base model.xlsx"}
+
+# Legitimate matches the name heuristic rejects, because the sheet uses a trade
+# name and EDGAR the registered one. Each value must appear in the EDGAR name.
+# Keep this narrow -- it defeats the collision guard for that ticker.
+NAME_OVERRIDES = {
+    "SPCX": "space exploration technologies",   # sheet says "SpaceX"
+}
 
 ORD = {"first": 1, "second": 2, "third": 3, "fourth": 4}
 MONTHS = {m: i + 1 for i, m in enumerate(
@@ -467,6 +477,113 @@ def best_periodic(cik, filings, q, year):
     return best[1] if best else None
 
 
+def first_public_quarter(filings):
+    """Calendar quarter of the company's earliest periodic report, or None.
+
+    A model should cover the company's life as a public filer and no more. The
+    earliest 10-Q/10-K (or 20-F/40-F) is the best available marker: a company
+    files one only once it reports publicly.
+
+    Bounded by EDGAR itself, which phased in electronic filing 1993-1996. For a
+    company listed long before that, this is EDGAR's earliest filing rather
+    than its true first report.
+    """
+    per = [f for f in filings
+           if f["form"].split("/")[0] in PERIODIC_FORMS and f.get("reportDate")]
+    if not per:
+        return None
+    first = min(per, key=lambda f: f["reportDate"])
+    try:
+        end = datetime.date(*map(int, first["reportDate"].split("-")))
+    except Exception:
+        return None
+    return nearest_quarter(end), first["reportDate"], first["form"]
+
+
+def model_is_skeleton(wb):
+    """True when the workbook holds only headers -- safe to restructure columns.
+
+    Models carrying real data or formulas are column-aligned; rewriting row 2
+    would silently misalign them, so those are left for a human.
+    """
+    for sheet in wb.sheetnames:
+        ws = wb[sheet]
+        for row in ws.iter_rows():
+            for c in row:
+                if c.value is None or c.row == 2:
+                    continue
+                if sheet == "Model" and c.coordinate == "B3":
+                    continue
+                return False
+    return True
+
+
+def sync_history(wb, ws, first_qy, dry_run=False):
+    """Make the header row span exactly the company's public life.
+
+    Adds quarters back to `first_qy` and drops any that predate it; the annual
+    block is trimmed and extended to match. Returns (added, removed) counts.
+    """
+    from copy import copy
+    quarters, annual = {}, {}
+    qstyle = lstyle = ystyle = None
+    for c in ws[2]:
+        if c.value is None:
+            continue
+        v = str(c.value).strip()
+        m = re.fullmatch(r"Q([1-4])(\d{2}|\d{4})", v)
+        if m:
+            y = int(m.group(2))
+            if y < 100:
+                y += 2000 if y < 70 else 1900
+            quarters[(int(m.group(1)), y)] = c.hyperlink.target if c.hyperlink else None
+            if c.hyperlink and lstyle is None:
+                lstyle = copy(c._style)
+            if not c.hyperlink and qstyle is None:
+                qstyle = copy(c._style)
+        elif re.fullmatch(r"\d{4}", v):
+            annual[int(v)] = True
+            if ystyle is None:
+                ystyle = copy(c._style)
+    if not quarters:
+        return 0, 0
+    if qstyle is None:
+        qstyle = lstyle
+
+    last = max(quarters, key=lambda k: (k[1], k[0]))   # keys are (q, y): order by year first
+    fq, fy = first_qy
+    wanted = [(q, y) for y in range(fy, last[1] + 1) for q in (1, 2, 3, 4)
+              if (y, q) >= (fy, fq) and (y, q) <= (last[1], last[0])]
+    added = len([k for k in wanted if k not in quarters])
+    removed = len([k for k in quarters if k not in wanted])
+    wanted_years = [y for y in range(fy, max(annual) + 1)] if annual else []
+
+    if dry_run or (added == 0 and removed == 0):
+        return added, removed
+
+    for c in ws[2]:
+        if c.column >= 3:
+            c.value = None
+            c.hyperlink = None
+            c._style = copy(qstyle)
+    col = 3
+    for key in wanted:
+        cell = ws.cell(row=2, column=col, value="Q%d%s" % (key[0], str(key[1])[2:]))
+        target = quarters.get(key)
+        if target:
+            cell.hyperlink = target
+            cell._style = copy(lstyle or qstyle)
+        else:
+            cell._style = copy(qstyle)
+        col += 1
+    col += 1
+    for y in wanted_years:
+        cell = ws.cell(row=2, column=col, value=y)
+        cell._style = copy(ystyle or qstyle)
+        col += 1
+    return added, removed
+
+
 def quarters_through_today(start_year):
     """Every quarter from start_year that has closed and had time to be reported."""
     cutoff = datetime.date.today() - datetime.timedelta(days=25)
@@ -502,7 +619,8 @@ def file_to_ticker(stem, known):
     return dotted if dotted in known else stem.upper()
 
 
-def refresh(stem, companies, cache, dry_run=False, rebuild=False, fallback_periodic=False):
+def refresh(stem, companies, cache, dry_run=False, rebuild=False, fallback_periodic=False,
+            sync=False, sync_only=False):
     import openpyxl
     from openpyxl.styles import Font
 
@@ -520,6 +638,9 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False, fallback_perio
 
     # Guard against ticker collisions -- EDGAR's 'H' is Hyatt, not Hydro One.
     expected = companies.get(ticker)
+    override = NAME_OVERRIDES.get(ticker)
+    if override and override in edgar_name.lower():
+        expected = None
     if expected and not names_match(expected, edgar_name):
         print("  %s: REFUSED -- sheet says %r, EDGAR ticker is %r"
               % (ticker, expected[:40], edgar_name[:40]))
@@ -532,6 +653,24 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False, fallback_perio
 
     wb = openpyxl.load_workbook(path)
     ws = wb["Model"]
+
+    if sync:
+        fp = first_public_quarter(filings)
+        if not fp:
+            print("  %s: no periodic report on EDGAR -- cannot date its public life" % ticker)
+        elif not model_is_skeleton(wb):
+            print("  %s: SKIPPED history sync -- workbook holds data or formulas that "
+                  "column changes would misalign; adjust by hand" % ticker)
+        else:
+            (fq, fy), period, form = fp
+            added, removed = sync_history(wb, ws, (fq, fy), dry_run)
+            if added or removed:
+                print("  %s: public from Q%d%s (%s %s) -- %d quarter(s) added, %d removed"
+                      % (ticker, fq, str(fy)[2:], form, period, added, removed))
+                if not dry_run:
+                    xlsx_safe.save_workbook(wb, path)
+        if sync_only:
+            return 0, 0
     # Headers are written either Q120 or Q12024 depending on the model's
     # vintage, so key on the parsed quarter rather than the label text.
     headers = {}
@@ -609,6 +748,13 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report without writing")
     ap.add_argument("--rebuild", action="store_true", help="replace links already present")
     ap.add_argument("--ignore-cache", action="store_true", help="re-search known-empty quarters")
+    ap.add_argument("--sync-history", action="store_true",
+                    help="make the header row span exactly the company's public life: "
+                         "extend back to its first periodic report and drop quarters and "
+                         "years from before it")
+    ap.add_argument("--sync-only", action="store_true",
+                    help="with --sync-history, fix the header range and stop without "
+                         "searching for links")
     ap.add_argument("--fallback-periodic", action="store_true",
                     help="where no earnings release exists, link the 10-Q/10-K covering "
                          "that period instead (styled differently)")
@@ -633,7 +779,7 @@ def main():
             print("[%d/%d]" % (i, len(stems)), flush=True)
             try:
                 n, e = refresh(stem, companies, cache, args.dry_run, args.rebuild,
-                               args.fallback_periodic)
+                               args.fallback_periodic, args.sync_history, args.sync_only)
                 total += n; total_err += e
             except Throttled:
                 raise

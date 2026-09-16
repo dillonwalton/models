@@ -29,6 +29,8 @@ Run from the repo root. Needs `openpyxl` (`py -3.14 -m pip install openpyxl`).
 | `--rebuild` | Re-evaluates quarters that already have links. Where no replacement is found the existing link is **kept**, so a rebuild cannot lose coverage. |
 | `--ignore-cache` | Retries quarters previously recorded as empty. Use after changing the matching logic. |
 | `--fallback-periodic` | Where no earnings release exists, links the 10-Q/10-K covering that period instead. See below. |
+| `--sync-history` | Makes the header row span exactly the company's public life — extends back to its first report, drops quarters and years from before it. |
+| `--sync-only` | With `--sync-history`, fixes the header range and stops without searching for links. |
 
 Quarters found to have no release are cached in `.refresh_links_cache.json`
 (gitignored) so the companies that yield nothing are not re-searched at full
@@ -116,6 +118,38 @@ Each of these caused a real wrong or missing link before it was fixed.
   non-accelerated filer has 90 days for a 10-K. Overlap is harmless — the text
   decides the quarter, not the date.
 
+## A model must span exactly the company's public life
+
+**This is a standing requirement, not an option.** A model should cover every
+quarter the company has reported as a public company, and none before it. Both
+directions matter:
+
+- Reach back to the **first ever public report**, not to whatever the template
+  shell happened to start at.
+- **Remove quarters and years from before the company was public.** A header
+  for a period when the company did not exist as a filer is not an empty cell
+  waiting to be filled — it is wrong, and it invites someone to fill it.
+
+`--sync-history` does both, and `--sync-only` does it without then searching
+for links (useful because the structural fix is cheap and the re-linking is
+not). The first public quarter is taken from the earliest 10-Q/10-K on EDGAR: a
+company files one only once it reports publicly.
+
+SpaceX is the case that motivated this. Its model shell ran from Q120, but
+SpaceX listed on 12 June 2026 and filed its first 10-Q that August — 25 of its
+28 quarters described a period when it was a private company.
+
+Two limits to state honestly when reporting:
+
+- **EDGAR bounds the answer.** Electronic filing phased in 1993–1996, so for a
+  company listed long before that this is EDGAR's earliest filing, not its true
+  first report. AEP reaches Q194 and Alliant Q492; both were public for decades
+  before.
+- **Models holding data or formulas are refused, not restructured.** Column
+  changes would silently misalign them. BE, EQIX, GEV, RUN and TSLA fall in
+  this group and need a human. The check is `model_is_skeleton()` — anything
+  outside header row 2 and `B3`.
+
 ## Reaching quarters older than EDGAR's press releases
 
 Earnings releases reached EDGAR only because of two rule changes: Regulation FD
@@ -174,6 +208,16 @@ SPDR Dow ETF (not Dialight), `SUN` → Sunoco (not Stardust Solar).
 The `SKIP` dict at the top of the script records known-bad tickers with their
 reason. Add to it when you confirm one; the name check is the safety net, not
 the primary record.
+
+**A SKIP entry can go stale.** SPCX was correctly skipped as private until
+SpaceX listed in June 2026, at which point the entry was simply false. Re-check
+an entry before relying on it, particularly for a company that might have
+IPO'd.
+
+`NAME_OVERRIDES` handles the opposite error — a legitimate match the heuristic
+rejects because the sheet uses a trade name and EDGAR the registered one
+("SpaceX" versus "SPACE EXPLORATION TECHNOLOGIES CORP"). Keep it narrow: each
+entry disables the collision guard for that ticker.
 
 ## Running at scale
 
