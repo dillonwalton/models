@@ -117,6 +117,14 @@ Each of these caused a real wrong or missing link before it was fixed.
 - **Reporting windows are generous** (Q4 runs into April) because a
   non-accelerated filer has 90 days for a 10-K. Overlap is harmless — the text
   decides the quarter, not the date.
+- **Long-form disclosure documents match on sheer size.** A spin-off
+  information statement, prospectus or proxy spans years and mentions almost
+  any quarter. The Constellation spin-off information statement was picked for
+  both EXC and CEG Q421 until those document types were disqualified.
+- **Range requests and gzip do not mix.** The fetcher asks for a byte range
+  *and* gzip, so bodies are routinely truncated gzip members. `gzip.decompress`
+  rejects those outright, which turned readable documents into lookup failures;
+  a raw `zlib.decompressobj` returns everything up to the cut.
 
 ## A model must span exactly the company's public life
 

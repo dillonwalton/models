@@ -17,7 +17,7 @@ Usage:
 Requires: openpyxl.  Set SEC_EDGAR_USER_AGENT to a contact email (SEC rejects
 requests without one).
 """
-import argparse, datetime, difflib, glob, gzip, json, os, re, sys, time, urllib.error, urllib.request
+import argparse, datetime, difflib, glob, gzip, json, os, re, sys, time, urllib.error, urllib.request, zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import xlsx_safe
@@ -66,7 +66,14 @@ QUARTER_END = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
 # "management" would reject real releases that mention a management call.
 NOT_A_RELEASE = (r"management.{0,8}s discussion", r"unaudited condensed",
                  r"certification of interim", r"earnings coverage ratio",
-                 r"form 52-109", r"consent of independent")
+                 r"form 52-109", r"consent of independent",
+                 # Long-form disclosure documents. These span years, so they
+                 # mention almost any quarter and match on sheer size: the
+                 # Constellation spin-off information statement was picked for
+                 # both EXC and CEG Q421 before this was added.
+                 r"information statement", r"registration statement",
+                 r"prospectus", r"proxy statement", r"table of contents",
+                 r"current information regarding")
 # Filed under Item 2.02 but not the quarterly results: segment restatements,
 # call advisories, dividend declarations, offering notices. These mention the
 # quarter and would otherwise score as a release -- Rockwell's "Provides
@@ -113,12 +120,14 @@ def fetch(url, cap=250000, tries=3):
             with urllib.request.urlopen(req, timeout=60) as resp:
                 raw = resp.read()
                 if resp.headers.get("Content-Encoding") == "gzip":
+                    # We ask for a byte range AND gzip, so the body is routinely a
+                    # truncated gzip member. gzip.decompress rejects those outright,
+                    # which turned readable documents into lookup failures; a raw
+                    # decompressobj returns everything up to the cut instead.
                     try:
-                        raw = gzip.decompress(raw)
+                        raw = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(raw)
                     except Exception:
-                        # A range-truncated gzip member cannot be decoded; decoding
-                        # the raw bytes would yield mojibake that fails every regex.
-                        raise FetchFailed("truncated gzip from %s" % url)
+                        raise FetchFailed("undecodable gzip from %s" % url)
                 return raw.decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             if e.code == 403:
