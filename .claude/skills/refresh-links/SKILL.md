@@ -5,6 +5,10 @@ description: Link quarterly earnings press releases from SEC EDGAR into a model'
 
 # Refresh press release links
 
+For a brand new company use **build-model**, which creates the model, adds it to
+the index, and then applies everything here. Use this skill directly to refresh
+models that already exist.
+
 Hyperlinks each quarter header on a model's `Model` sheet to that quarter's
 earnings press release on SEC EDGAR. The target is the exhibit itself — the
 release document — not the filing index page.
@@ -29,8 +33,8 @@ Run from the repo root. Needs `openpyxl` (`py -3.14 -m pip install openpyxl`).
 | `--rebuild` | Re-evaluates quarters that already have links. Where no replacement is found the existing link is **kept**, so a rebuild cannot lose coverage. |
 | `--ignore-cache` | Retries quarters previously recorded as empty. Use after changing the matching logic. |
 | `--fallback-periodic` | Where no earnings release exists, links the 10-Q/10-K covering that period instead. See below. |
-| `--sync-history` | Makes the header row span exactly the company's public life — extends back to its first report, drops quarters and years from before it. |
-| `--sync-only` | With `--sync-history`, fixes the header range and stops without searching for links. |
+| `--no-sync-history` | Skips the header-range check. **On by default**: the header row is made to span exactly the company's public life — extended back to its first report, with quarters and years from before it dropped. |
+| `--sync-only` | Fixes the header range and stops without searching for links. |
 
 Quarters found to have no release are cached in `.refresh_links_cache.json`
 (gitignored) so the companies that yield nothing are not re-searched at full
@@ -138,9 +142,9 @@ directions matter:
   for a period when the company did not exist as a filer is not an empty cell
   waiting to be filled — it is wrong, and it invites someone to fill it.
 
-`--sync-history` does both, and `--sync-only` does it without then searching
-for links (useful because the structural fix is cheap and the re-linking is
-not). The first public quarter is taken from the earliest 10-Q/10-K on EDGAR: a
+This happens **by default** on every run; `--no-sync-history` opts out, and
+`--sync-only` does the structural fix alone (useful because it is cheap and the
+re-linking is not). The first public quarter is taken from the earliest 10-Q/10-K on EDGAR: a
 company files one only once it reports publicly.
 
 SpaceX is the case that motivated this. Its model shell ran from Q120, but

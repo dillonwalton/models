@@ -822,10 +822,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report without writing")
     ap.add_argument("--rebuild", action="store_true", help="replace links already present")
     ap.add_argument("--ignore-cache", action="store_true", help="re-search known-empty quarters")
-    ap.add_argument("--sync-history", action="store_true",
-                    help="make the header row span exactly the company's public life: "
-                         "extend back to its first periodic report and drop quarters and "
-                         "years from before it")
+    ap.add_argument("--no-sync-history", action="store_true",
+                    help="skip the header-range check. By default the header row is made "
+                         "to span exactly the company's public life: extended back to its "
+                         "first periodic report, with quarters and years from before it "
+                         "dropped")
     ap.add_argument("--filing-row", action="store_true",
                     help="put the 10-Q/10-K for each quarter in row 1, above its header, "
                          "leaving the release links in row 2 untouched")
@@ -856,7 +857,7 @@ def main():
             print("[%d/%d]" % (i, len(stems)), flush=True)
             try:
                 n, e = refresh(stem, companies, cache, args.dry_run, args.rebuild,
-                               args.fallback_periodic, args.sync_history, args.sync_only,
+                               args.fallback_periodic, not args.no_sync_history, args.sync_only,
                                args.filing_row)
                 total += n; total_err += e
             except Throttled:
