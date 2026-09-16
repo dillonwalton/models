@@ -155,8 +155,39 @@ Two limits to state honestly when reporting:
   before.
 - **Models holding data or formulas are refused, not restructured.** Column
   changes would silently misalign them. BE, EQIX, GEV, RUN and TSLA fall in
-  this group and need a human. The check is `model_is_skeleton()` — anything
-  outside header row 2 and `B3`.
+  this group. The check is `model_is_skeleton()` — anything outside header
+  row 2 and `B3`. They were handled through Excel instead; see below.
+
+## Workbooks openpyxl must not write
+
+**openpyxl cannot round-trip every workbook.** Writing `BE.xlsx` or `TSLA.xlsx`
+through it produces a file that openpyxl itself reads back perfectly and Excel
+refuses to open at all — apparently over its handling of cell comments.
+Stripping the threaded comments does not help; the output is rejected either
+way.
+
+This went unnoticed for several commits because every check used openpyxl.
+**Verifying a workbook by reading it back with the library that wrote it proves
+nothing.** Open it in Excel:
+
+```powershell
+$xl = New-Object -ComObject Excel.Application; $xl.Visible=$false; $xl.DisplayAlerts=$false
+Get-ChildItem *.xlsx | Where-Object { $_.Name -notlike '~$*' } | ForEach-Object {
+  try { $wb=$xl.Workbooks.Open($_.FullName); $wb.Close($false) } catch { $_.Name }
+}
+$xl.Quit()
+```
+
+For those models, work through Excel instead:
+
+- `compute_links.py TICKER out.json` — resolves the links, writes no workbook.
+- `apply_links.ps1 -Ticker TICKER -JsonPath out.json` — applies them in Excel.
+- `extend_quarters.ps1 -Ticker TICKER -FirstQuarter N -FirstYear YYYY` — inserts
+  historical quarter columns.
+
+Excel must do the column insert regardless of the comment problem, because it
+re-points every formula: a 35-column shift turned `=861-H3` into `=861-AQ3`.
+openpyxl moves the cells and leaves the references behind, silently.
 
 ## Reaching quarters older than EDGAR's press releases
 
