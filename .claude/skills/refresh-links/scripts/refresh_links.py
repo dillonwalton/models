@@ -48,6 +48,12 @@ SKIP = {
 }
 NOT_A_MODEL = {"Utilities.xlsx", "base model.xlsx"}
 
+# Workbooks openpyxl cannot round-trip: it reads its own output back perfectly
+# and Excel refuses to open the file at all, apparently over cell comments.
+# Writing these corrupted them once already and it went unnoticed, because the
+# verification also used openpyxl. Use compute_links.py + apply_links.ps1.
+OPENPYXL_UNSAFE = {"BE", "TSLA"}
+
 # Legitimate matches the name heuristic rejects, because the sheet uses a trade
 # name and EDGAR the registered one. Each value must appear in the EDGAR name.
 # Keep this narrow -- it defeats the collision guard for that ticker.
@@ -500,7 +506,10 @@ def best_periodic(cik, filings, q, year):
             url = index_url
             if doc:
                 doc_url = "https://www.sec.gov/Archives/edgar/data/%d/%s/%s" % (cik, nodash, doc)
-                if url_ok(doc_url):
+                # The unserved-primaryDocument problem is confined to the early
+                # 2000s; verifying every modern filing would add thousands of
+                # requests and invite another throttle.
+                if f["filingDate"] >= "2004-01-01" or url_ok(doc_url):
                     url = doc_url
             best = (rank, {"url": url, "filed": f["filingDate"], "form": f["form"],
                            "period": f["reportDate"], "periodic": True})
@@ -614,6 +623,30 @@ def sync_history(wb, ws, first_qy, dry_run=False):
     return added, removed
 
 
+def write_filing_row(ws, cik, filings, headers, rebuild=False):
+    """Put the 10-Q/10-K for each quarter in row 1, above its header.
+
+    The release and the periodic report are separate EDGAR submissions -- Duke
+    filed both for Q120 on 12 May 2020 under different accession numbers -- so
+    no single link reaches both. Row 1 is free in almost every model, so the
+    filing sits above the release rather than displacing anything.
+    """
+    from openpyxl.styles import Font
+    written = 0
+    for (q, y), cell in sorted(headers.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        above = ws.cell(row=1, column=cell.column)
+        if above.hyperlink and not rebuild:
+            continue
+        hit = best_periodic(cik, filings, q, y)
+        if not hit:
+            continue
+        above.value = hit["form"]
+        above.hyperlink = hit["url"]
+        above.font = Font(name=cell.font.name, sz=9, u="single", color="FF595959")
+        written += 1
+    return written
+
+
 def quarters_through_today(start_year):
     """Every quarter from start_year that has closed and had time to be reported."""
     cutoff = datetime.date.today() - datetime.timedelta(days=25)
@@ -650,7 +683,7 @@ def file_to_ticker(stem, known):
 
 
 def refresh(stem, companies, cache, dry_run=False, rebuild=False, fallback_periodic=False,
-            sync=False, sync_only=False):
+            sync=False, sync_only=False, filing_row=False):
     import openpyxl
     from openpyxl.styles import Font
 
@@ -660,6 +693,10 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False, fallback_perio
     ticker = file_to_ticker(stem, companies)
     if ticker in SKIP:
         print("  %s: skipped -- %s" % (ticker, SKIP[ticker])); return 0, 0
+    if ticker in OPENPYXL_UNSAFE and not dry_run:
+        print("  %s: REFUSED -- openpyxl cannot write this workbook without making it "
+              "unopenable in Excel; use compute_links.py + apply_links.ps1" % ticker)
+        return 0, 0
 
     tmap = ticker_map()
     if ticker not in tmap:
@@ -715,6 +752,13 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False, fallback_perio
     if not headers:
         print("  %s: no quarter headers on Model row 2" % ticker); return 0, 0
     start_year = min(y for _, y in headers)
+
+    if filing_row:
+        n = write_filing_row(ws, cik, filings, headers, rebuild)
+        if n and not dry_run:
+            xlsx_safe.save_workbook(wb, path)
+        print("  %s (%s): %d filing link(s) in row 1" % (ticker, edgar_name[:38], n))
+        return 0, 0
 
     written = errors = periodic = 0
     pending = False
@@ -782,6 +826,9 @@ def main():
                     help="make the header row span exactly the company's public life: "
                          "extend back to its first periodic report and drop quarters and "
                          "years from before it")
+    ap.add_argument("--filing-row", action="store_true",
+                    help="put the 10-Q/10-K for each quarter in row 1, above its header, "
+                         "leaving the release links in row 2 untouched")
     ap.add_argument("--sync-only", action="store_true",
                     help="with --sync-history, fix the header range and stop without "
                          "searching for links")
@@ -809,7 +856,8 @@ def main():
             print("[%d/%d]" % (i, len(stems)), flush=True)
             try:
                 n, e = refresh(stem, companies, cache, args.dry_run, args.rebuild,
-                               args.fallback_periodic, args.sync_history, args.sync_only)
+                               args.fallback_periodic, args.sync_history, args.sync_only,
+                               args.filing_row)
                 total += n; total_err += e
             except Throttled:
                 raise

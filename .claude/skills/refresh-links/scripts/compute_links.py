@@ -11,6 +11,7 @@ import refresh_links as R
 
 def main():
     ticker, out = sys.argv[1], sys.argv[2]
+    filing_mode = "--filing-row" in sys.argv
     companies = R.index_companies()
     tmap = R.ticker_map()
     t = R.file_to_ticker(ticker, companies)
@@ -28,6 +29,19 @@ def main():
             if y < 100:
                 y += 2000 if y < 70 else 1900
             headers[(int(m.group(1)), y)] = (str(c.value).strip(), c.hyperlink is not None)
+
+    if filing_mode:
+        # Row 1: the 10-Q/10-K for each quarter, whatever row 2 already holds.
+        results = {}
+        for (q, y), (label, _) in sorted(headers.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+            hit = R.best_periodic(cik, filings, q, y)
+            if hit:
+                results[label] = {"url": hit["url"], "form": hit["form"], "periodic": True}
+                print("  %s %s: %s %s" % (ticker, label, hit["form"],
+                                          hit["url"].split("/")[-1]), flush=True)
+        json.dump(results, open(out, "w"), indent=1)
+        print("%s: %d filing link(s) computed -> %s" % (ticker, len(results), out))
+        return
 
     results = {}
     for (q, y), (label, already) in sorted(headers.items(), key=lambda kv: (kv[0][1], kv[0][0])):

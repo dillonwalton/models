@@ -6,7 +6,8 @@
 # here instead, by Excel itself.
 param(
     [Parameter(Mandatory = $true)][string]$Ticker,
-    [Parameter(Mandatory = $true)][string]$JsonPath
+    [Parameter(Mandatory = $true)][string]$JsonPath,
+    [int]$Row = 2          # 2 = quarter header / release, 1 = the 10-Q/10-K above it
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,10 +28,15 @@ try {
         $entry = $links.$v
         if (-not $entry) { continue }
 
-        $cell = $ws.Cells.Item(2, $c)
+        $cell = $ws.Cells.Item($Row, $c)
+        $label = if ($Row -eq 1) { $entry.form } else { $v }
         $ws.Hyperlinks.Add($cell, $entry.url) | Out-Null
-        $cell.Value2 = $v                       # Add() can blank the label
-        if ($entry.periodic) {
+        $cell.Value2 = $label                   # Add() can blank the label
+        if ($Row -eq 1) {
+            $cell.Font.Color = 5855577          # grey, BGR for FF595959
+            $cell.Font.Size = 9
+            $cell.Font.Italic = $false
+        } elseif ($entry.periodic) {
             $cell.Font.Color = 10498160         # purple, BGR for FF7030A0
             $cell.Font.Italic = $true
             $periodic++

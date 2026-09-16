@@ -192,6 +192,40 @@ Excel must do the column insert regardless of the comment problem, because it
 re-points every formula: a 35-column shift turned `=861-H3` into `=861-AQ3`.
 openpyxl moves the cells and leaves the references behind, silently.
 
+## The actuals/forecast arrows
+
+Two vertical connectors on the Model sheet mark where actuals end: one between
+Q226 and Q326, one between 2025 and 2026. They are anchored to absolute column
+indices, so **every column insert leaves them pointing at the wrong place** —
+after the history sync all 161 were still sitting at the template's original
+positions.
+
+```bash
+python .claude/skills/refresh-links/scripts/place_arrows.py            # all models
+python .claude/skills/refresh-links/scripts/place_arrows.py DUK --dry-run
+```
+
+It rewrites `xl/drawings/drawing1.xml` directly, not through openpyxl, which
+drops drawings and cannot write some workbooks at all. It also adds the drawing
+to models that never had one, and covers `base model.xlsx` only when named
+explicitly — worth doing, since new models inherit its arrow positions.
+
+Re-run it after anything that inserts columns. Verify in Excel, filtering to
+connector shapes: cell comments are also `Shapes` and sit in column C, which
+looks like a misplaced arrow if you count them.
+
+## Linking both the release and the full filing
+
+A cell holds one hyperlink, and the release and the periodic report are separate
+EDGAR submissions — Duke filed both for Q120 on 12 May 2020 under different
+accession numbers, so no single URL reaches both. A filing index page shows
+everything in *one* submission (release, CFO commentary, presentation, XBRL),
+never the 10-Q.
+
+So `--filing-row` puts the 10-Q/10-K in **row 1**, above the quarter header,
+in small grey. Row 1 was empty in 162 of 165 models, so nothing is displaced
+and no formulas move.
+
 ## Reaching quarters older than EDGAR's press releases
 
 Earnings releases reached EDGAR only because of two rule changes: Regulation FD
