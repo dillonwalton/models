@@ -193,6 +193,12 @@ def periods(text, calendar_filer=True, fye=None):
                                  r"fiscal(?: year)? (\d{4})", t):
                 found.add(nearest_quarter(fiscal_period_end(fye, ORD[m.group(1)],
                                                             int(m.group(2)))))
+            # "Fourth Quarter and Fiscal 2020" -- joined by "and", which the
+            # of/ended pattern above does not cover.
+            for m in re.finditer(r"(first|second|third|fourth) quarter and "
+                                 r"fiscal(?: year)? (\d{4})", t):
+                found.add(nearest_quarter(fiscal_period_end(fye, ORD[m.group(1)],
+                                                            int(m.group(2)))))
             for m in re.finditer(r"\bq([1-4]) fy ?(\d{4})", t):
                 found.add(nearest_quarter(fiscal_period_end(fye, int(m.group(1)),
                                                             int(m.group(2)))))
@@ -240,7 +246,9 @@ def looks_like_release(text):
     # further in: letterhead and address blocks routinely push the headline
     # past 600 characters (Rockwell's releases open with a Milwaukee address).
     head = text.lower()[:800]
-    body = text.lower()[:3000]
+    # Scanned well past the headline: 2000s-era releases bury it behind long
+    # contact blocks (NVIDIA's 2007 Q3 release reaches "results" at ~4,850).
+    body = text.lower()[:8000]
     if any(re.search(p, head) for p in NOT_A_RELEASE):
         return False
     if any(re.search(p, head) for p in STRONG_RESULTS):
@@ -341,7 +349,13 @@ def exhibits(cik, accession):
         cells = [re.sub(r"<[^>]+>", "", c).replace("&nbsp;", " ").strip()
                  for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S | re.I)]
         href = re.search(r'href="([^"]+)"', row)
-        if len(cells) >= 4 and href and cells[3].upper().startswith("EX-99"):
+        # Match on the exhibit description as well as the type: filers mistype
+        # the type often enough to matter (NVIDIA's Q3 FY20 press release is
+        # filed as EX-95.1, so a type-only filter never sees it).
+        if len(cells) >= 4 and href and (
+                cells[3].upper().startswith("EX-99")
+                or re.search(r"press release|earnings|results|shareholder letter",
+                             cells[1], re.I)):
             out.append({"type": cells[3],
                         "url": "https://www.sec.gov" + href.group(1).replace("/ix?doc=", "")})
     return out
@@ -463,7 +477,9 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False):
         m = re.fullmatch(r"Q([1-4])(\d{2}|\d{4})", str(cell.value).strip()) if cell.value else None
         if m:
             year = int(m.group(2))
-            headers[(int(m.group(1)), year + 2000 if year < 100 else year)] = cell
+            if year < 100:                 # Q498 is 1998, not 2098
+                year += 2000 if year < 70 else 1900
+            headers[(int(m.group(1)), year)] = cell
     if not headers:
         print("  %s: no quarter headers on Model row 2" % ticker); return 0, 0
     start_year = min(y for _, y in headers)
