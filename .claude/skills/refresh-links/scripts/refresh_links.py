@@ -24,6 +24,9 @@ import xlsx_safe
 
 UA = os.environ.get("SEC_EDGAR_USER_AGENT", "").strip()
 CACHE_FILE = ".refresh_links_cache.json"
+# SEC publishes 10 req/sec, but sustained multi-hour runs get 429s well inside
+# that. 0.18s (~5.5/sec) has proven durable; raise it if throttling returns.
+REQUEST_INTERVAL = float(os.environ.get("SEC_REQUEST_INTERVAL", "0.18"))
 INDEX_WORKBOOK = "Utilities.xlsx"
 
 # Tickers whose EDGAR entry is a different company, or that are not SEC
@@ -117,9 +120,20 @@ def fetch(url, cap=250000, tries=3):
                         raise FetchFailed("truncated gzip from %s" % url)
                 return raw.decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            if e.code in (403, 429):
-                raise Throttled("SEC returned %d for %s -- stopping. Check "
-                                "SEC_EDGAR_USER_AGENT and back off." % (e.code, url))
+            if e.code == 403:
+                raise Throttled("SEC returned 403 for %s -- stopping. Check "
+                                "SEC_EDGAR_USER_AGENT." % url)
+            if e.code == 429:
+                # Rate limited. Sustained runs earn this even inside SEC's
+                # stated 10/sec, so wait it out rather than ending the run;
+                # give up only if it persists, since blanks after a throttle
+                # would be meaningless.
+                if attempt == tries - 1:
+                    raise Throttled("SEC still rate-limiting after %d attempts (%s). "
+                                    "Wait and re-run; work so far is saved." % (tries, url))
+                wait = float(e.headers.get("Retry-After") or 0) or 10.0 * (3 ** attempt)
+                time.sleep(min(wait, 120))
+                continue
             if e.code == 404:
                 raise FetchFailed("404 %s" % url)
             last = e
@@ -127,7 +141,7 @@ def fetch(url, cap=250000, tries=3):
             last = e
         if attempt < tries - 1:
             time.sleep(1.5 * (attempt + 1))          # backoff, not a flat retry
-        time.sleep(0.11)                              # SEC allows 10 req/sec
+        time.sleep(REQUEST_INTERVAL)
     raise FetchFailed("%s after %d tries: %s" % (url, tries, last))
 
 
@@ -433,7 +447,7 @@ def url_ok(url):
     except Exception:
         return False
     finally:
-        time.sleep(0.11)
+        time.sleep(REQUEST_INTERVAL)
 
 
 def best_periodic(cik, filings, q, year):
