@@ -1,6 +1,6 @@
 ---
 name: build-model
-description: Create a new financial model for a public company, add it to the Utilities index, and link every quarter to its SEC filings. Use when the user asks to build, create, or add a model for a company or ticker (e.g. "build a model for CoreWeave", "add a NVDA model", "new model for Digital Realty").
+description: Create a new financial model for a public company, add it to the portfolio index, and link every quarter to its SEC filings. Use when the user asks to build, create, or add a model for a company or ticker (e.g. "build a model for CoreWeave", "add a NVDA model", "new model for Digital Realty").
 ---
 
 # Build a model
@@ -24,9 +24,9 @@ Run from the repo root. Needs `openpyxl`.
 
 ## What it does
 
-1. **Creates `<TICKER>.xlsx`** from `base model.xlsx`. Never overwrites an
+1. **Creates `companies/<TICKER>.xlsx`** from `base.xlsx`. Never overwrites an
    existing model. Dots in tickers become underscores — `BEP.UN` → `BEP_UN.xlsx`.
-2. **Adds the company to `Utilities.xlsx` `Main`** and hyperlinks the row to the
+2. **Adds the company to `portfolio.xlsx` `Main`** and hyperlinks the row to the
    model. Name, exchange and industry come from EDGAR, so the row matches how
    the company actually reports. If the ticker is already listed, the existing
    row is linked rather than duplicated.

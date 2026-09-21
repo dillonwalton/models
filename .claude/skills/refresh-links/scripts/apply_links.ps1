@@ -11,7 +11,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$path = Join-Path (Get-Location) "$Ticker.xlsx"
+$path = Join-Path (Join-Path (Get-Location) "companies") "$Ticker.xlsx"
 $links = Get-Content $JsonPath -Raw | ConvertFrom-Json
 
 $xl = New-Object -ComObject Excel.Application

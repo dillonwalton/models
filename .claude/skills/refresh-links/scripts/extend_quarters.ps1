@@ -9,7 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$path = Join-Path (Get-Location) "$Ticker.xlsx"
+$path = Join-Path (Join-Path (Get-Location) "companies") "$Ticker.xlsx"
 if (-not (Test-Path $path)) { throw "no model at $path" }
 
 $xl = New-Object -ComObject Excel.Application

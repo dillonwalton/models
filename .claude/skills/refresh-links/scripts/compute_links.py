@@ -20,7 +20,7 @@ def main():
     calendar = (fye or "1231") == "1231"
 
     import openpyxl
-    ws = openpyxl.load_workbook("%s.xlsx" % ticker)["Model"]
+    ws = openpyxl.load_workbook(R.model_path(ticker))["Model"]
     headers = {}
     for c in ws[2]:
         m = re.fullmatch(r"Q([1-4])(\d{2}|\d{4})", str(c.value).strip()) if c.value else None

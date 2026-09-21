@@ -2,8 +2,8 @@
 
 One command does the whole job:
 
-  1. copy `base model.xlsx` to <TICKER>.xlsx (dots in tickers become underscores)
-  2. add the company to Utilities.xlsx `Main` and link the row to the model
+  1. copy `base.xlsx` to companies/<TICKER>.xlsx (dots in tickers become underscores)
+  2. add the company to portfolio.xlsx `Main` and link the row to the model
   3. set the header row to span exactly the company's public life
   4. link each quarter to its earnings release, falling back to the 10-Q/10-K
   5. put the 10-Q/10-K in row 1 above each quarter
@@ -23,8 +23,8 @@ sys.path.insert(0, LINKS)
 import refresh_links as R          # noqa: E402
 import xlsx_safe                   # noqa: E402
 
-TEMPLATE = "base model.xlsx"
-INDEX = "Utilities.xlsx"
+TEMPLATE = "base.xlsx"
+INDEX = "portfolio.xlsx"
 
 
 def sheet_ticker(ticker):
@@ -61,7 +61,7 @@ def add_index_row(ticker, profile, dry_run=False):
     wb = openpyxl.load_workbook(INDEX)
     ws = wb["Main"]
     t = sheet_ticker(ticker)
-    target = "%s.xlsx" % file_stem(ticker)
+    target = R.model_path(file_stem(ticker))
 
     last = 2
     existing = None
@@ -117,7 +117,7 @@ def main():
 
     t = sheet_ticker(args.ticker)
     stem = file_stem(args.ticker)
-    path = "%s.xlsx" % stem
+    path = R.model_path(stem)
 
     profile = company_profile(t)
     if profile is None:
@@ -135,6 +135,7 @@ def main():
     elif args.dry_run:
         print("  would create %s from %s" % (path, TEMPLATE))
     else:
+        os.makedirs(R.MODEL_DIR, exist_ok=True)
         shutil.copy2(TEMPLATE, path)
         print("  created %s" % path)
 

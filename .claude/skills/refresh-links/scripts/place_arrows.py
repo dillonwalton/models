@@ -14,6 +14,7 @@ drops drawings entirely and cannot write some of these workbooks at all.
 import glob, os, re, shutil, sys, zipfile
 import openpyxl
 
+MODEL_DIR = "companies"                         # models live here; the index does not
 QUARTER_ANCHOR = re.compile(r"^Q3(26|2026)$")   # arrow sits at Q326's left edge
 YEAR_ANCHOR = "2026"                            # and at 2026's left edge
 FIRST_ROW, LAST_ROW = 0, 41
@@ -140,18 +141,26 @@ def place(path, dry_run=False):
     return "moved %s -> %s" % (current or "none", cols)
 
 
+def resolve(name):
+    """Name -> workbook path. Models live in MODEL_DIR, but the template sits at
+    the repo root, so `place_arrows.py base` still finds it."""
+    path = "%s/%s.xlsx" % (MODEL_DIR, name)
+    return path if os.path.exists(path) else "%s.xlsx" % name
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     dry = "--dry-run" in sys.argv
-    targets = ["%s.xlsx" % a for a in args] if args else [
-        os.path.basename(p) for p in sorted(glob.glob("*.xlsx"))
-        if os.path.basename(p) not in ("Utilities.xlsx", "base model.xlsx")
+    targets = [resolve(a) for a in args] if args else [
+        "%s/%s" % (MODEL_DIR, os.path.basename(p))
+        for p in sorted(glob.glob(MODEL_DIR + "/*.xlsx"))
+        if os.path.basename(p) not in ("portfolio.xlsx", "base.xlsx")
         and not os.path.basename(p).startswith("~$")]
     counts = {}
     for t in targets:
         r = place(t, dry)
         counts[r.split(" ")[0]] = counts.get(r.split(" ")[0], 0) + 1
-        print("  %-8s %s" % (t[:-5], r))
+        print("  %-8s %s" % (os.path.basename(t)[:-5], r))
     print("\n" + ", ".join("%s: %d" % kv for kv in sorted(counts.items())))
 
 

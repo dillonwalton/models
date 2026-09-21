@@ -27,7 +27,9 @@ CACHE_FILE = ".refresh_links_cache.json"
 # SEC publishes 10 req/sec, but sustained multi-hour runs get 429s well inside
 # that. 0.18s (~5.5/sec) has proven durable; raise it if throttling returns.
 REQUEST_INTERVAL = float(os.environ.get("SEC_REQUEST_INTERVAL", "0.18"))
-INDEX_WORKBOOK = "Utilities.xlsx"
+INDEX_WORKBOOK = "portfolio.xlsx"
+# Models live in companies/; the index workbook stays at the repo root.
+MODEL_DIR = "companies"
 
 # Tickers whose EDGAR entry is a different company, or that are not SEC
 # registrants. Verified against the index workbook at run time as well, but
@@ -46,7 +48,7 @@ SKIP = {
     "DYNA":  "Dynastar Holdings -- no EDGAR ticker mapping",
     "SBGSY": "Schneider Electric ADR -- files in France, not with the SEC",
 }
-NOT_A_MODEL = {"Utilities.xlsx", "base model.xlsx"}
+NOT_A_MODEL = {"portfolio.xlsx", "base.xlsx"}
 
 # Workbooks openpyxl cannot round-trip: it reads its own output back perfectly
 # and Excel refuses to open the file at all, apparently over cell comments.
@@ -674,6 +676,12 @@ def save_cache(cache):
     os.replace(tmp, CACHE_FILE)
 
 
+def model_path(stem):
+    """Where a model lives. Forward slash: this doubles as a hyperlink target,
+    and the index workbook's links are written that way."""
+    return "%s/%s.xlsx" % (MODEL_DIR, stem)
+
+
 def file_to_ticker(stem, known):
     """Model filenames sanitize dots: BEP_UN.xlsx is ticker BEP.UN."""
     if stem.upper() in known or "_" not in stem:
@@ -687,7 +695,7 @@ def refresh(stem, companies, cache, dry_run=False, rebuild=False, fallback_perio
     import openpyxl
     from openpyxl.styles import Font
 
-    path = "%s.xlsx" % stem
+    path = model_path(stem)
     if not os.path.exists(path):
         print("  %s: no model file" % stem); return 0, 0
     ticker = file_to_ticker(stem, companies)
@@ -843,7 +851,7 @@ def main():
 
     stems = args.tickers
     if args.all:
-        stems = sorted(os.path.basename(p)[:-5] for p in glob.glob("*.xlsx")
+        stems = sorted(os.path.basename(p)[:-5] for p in glob.glob(MODEL_DIR + "/*.xlsx")
                        if os.path.basename(p) not in NOT_A_MODEL
                        and not os.path.basename(p).startswith("~$"))
     if not stems:

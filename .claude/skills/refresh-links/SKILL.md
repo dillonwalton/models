@@ -24,7 +24,8 @@ python .claude/skills/refresh-links/scripts/refresh_links.py NVDA --rebuild
 python .claude/skills/refresh-links/scripts/refresh_links.py --all --ignore-cache
 ```
 
-Run from the repo root. Needs `openpyxl` (`py -3.14 -m pip install openpyxl`).
+Run from the repo root — models are found under `companies/`, and the index
+workbook is `portfolio.xlsx`. Needs `openpyxl` (`py -3.14 -m pip install openpyxl`).
 
 | Flag | Effect |
 |---|---|
@@ -176,7 +177,7 @@ nothing.** Open it in Excel:
 
 ```powershell
 $xl = New-Object -ComObject Excel.Application; $xl.Visible=$false; $xl.DisplayAlerts=$false
-Get-ChildItem *.xlsx | Where-Object { $_.Name -notlike '~$*' } | ForEach-Object {
+Get-ChildItem companies\*.xlsx | Where-Object { $_.Name -notlike '~$*' } | ForEach-Object {
   try { $wb=$xl.Workbooks.Open($_.FullName); $wb.Close($false) } catch { $_.Name }
 }
 $xl.Quit()
@@ -211,7 +212,7 @@ python .claude/skills/refresh-links/scripts/place_arrows.py DUK --dry-run
 
 It rewrites `xl/drawings/drawing1.xml` directly, not through openpyxl, which
 drops drawings and cannot write some workbooks at all. It also adds the drawing
-to models that never had one, and covers `base model.xlsx` only when named
+to models that never had one, and covers `base.xlsx` only when named
 explicitly — worth doing, since new models inherit its arrow positions.
 
 Re-run it after anything that inserts columns. Verify in Excel, filtering to
@@ -340,7 +341,7 @@ The run's summary counts *links written this pass*, which is not coverage — a
 model already fully linked correctly reports zero. Read the workbooks:
 
 ```python
-ws = openpyxl.load_workbook(f"{ticker}.xlsx")["Model"]
+ws = openpyxl.load_workbook(f"companies/{ticker}.xlsx")["Model"]
 linked = [c.value for c in ws[2] if c.hyperlink]
 ```
 
