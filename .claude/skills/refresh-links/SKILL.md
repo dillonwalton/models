@@ -219,6 +219,41 @@ Re-run it after anything that inserts columns. Verify in Excel, filtering to
 connector shapes: cell comments are also `Shapes` and sit in column C, which
 looks like a misplaced arrow if you count them.
 
+## Frozen panes on the Model sheet
+
+The Model sheet is frozen at **C3** — rows 1-2 and columns A-B — so the label
+column, the filing row and the quarter headers stay visible while scrolling
+through a couple of hundred quarters.
+
+```bash
+python .claude/skills/refresh-links/scripts/freeze_panes.py            # all models
+python .claude/skills/refresh-links/scripts/freeze_panes.py DUK --dry-run
+python .claude/skills/refresh-links/scripts/freeze_panes.py base       # the template
+```
+
+The anchor is one column right of the label column and one row below the
+quarter headers. It is a constant rather than a search because all 166 models
+share that geometry, and because the five data-bearing models (BE, EQIX, GEV,
+RUN, TSLA) were already frozen at C3 by hand — the script matches what a person
+did in Excel rather than inventing a convention.
+
+Like the arrows, it rewrites the sheet XML directly and covers `base.xlsx` only
+when named explicitly — worth doing, since new models inherit the freeze from
+the template. It needs no openpyxl at all, which is the point: a script whose
+whole job is a view setting should not rebuild the workbook to apply it.
+
+Two details that are easy to get wrong:
+
+- With frozen panes the `<pane>` element owns the scrollable region's top-left,
+  so `sheetView@topLeftCell="W1"` becomes `pane@topLeftCell="W3"`. Moving it
+  keeps each model scrolled to its recent quarters; leaving both in place makes
+  Excel disagree with itself about where the view starts.
+- `<pane>` must precede `<selection>`, and the active cell needs
+  `pane="bottomRight"` or it lands in the frozen corner.
+
+Re-running is a no-op — a sheet already frozen below the headers keeps the
+scroll position it was saved with.
+
 ## Linking both the release and the full filing
 
 A cell holds one hyperlink, and the release and the periodic report are separate
