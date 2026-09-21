@@ -3,7 +3,7 @@
 One command does the whole job:
 
   1. copy `base.xlsx` to companies/<TICKER>.xlsx (dots in tickers become underscores)
-  2. add the company to portfolio.xlsx `Main` and link the row to the model
+  2. add the company to portfolio.xlsx `Main` and link the ticker to the model
   3. set the header row to span exactly the company's public life
   4. link each quarter to its earnings release, falling back to the 10-Q/10-K
   5. put the 10-Q/10-K in row 1 above each quarter
@@ -37,8 +37,8 @@ def file_stem(ticker):
 
 
 def company_profile(ticker):
-    """Name, exchange and industry straight from EDGAR, so the index row is
-    consistent with how the company actually reports."""
+    """Name and industry straight from EDGAR, so the index row is consistent
+    with how the company actually reports."""
     tmap = R.ticker_map()
     t = sheet_ticker(ticker)
     if t not in tmap:
@@ -46,14 +46,16 @@ def company_profile(ticker):
     cik, name = tmap[t]
     sub = R.json.loads(R.fetch("https://data.sec.gov/submissions/CIK%010d.json" % cik,
                                cap=20000000))
-    exchanges = [e for e in (sub.get("exchanges") or []) if e]
     return {"cik": cik, "name": sub.get("name") or name,
-            "exchange": exchanges[0] if exchanges else None,
             "industry": sub.get("sicDescription") or None}
 
 
 def add_index_row(ticker, profile, dry_run=False):
-    """Add the company to Main, or link an existing row. Returns a status string."""
+    """Add the company to Main, or link an existing row. Returns a status string.
+
+    The link lives on the Ticker cell (column C); Company (column B) is plain
+    text and carries no ticker.
+    """
     import openpyxl
     from copy import copy
     if not os.path.exists(INDEX):
@@ -73,28 +75,26 @@ def add_index_row(ticker, profile, dry_run=False):
                 existing = r
     style_from = None
     for r in range(3, ws.max_row + 1):
-        if ws.cell(row=r, column=2).hyperlink:
-            style_from = ws.cell(row=r, column=2)
+        if ws.cell(row=r, column=3).hyperlink:
+            style_from = (ws.cell(row=r, column=2), ws.cell(row=r, column=3))
             break
 
     row = existing or last + 1
-    if existing and ws.cell(row=row, column=2).hyperlink:
+    if existing and ws.cell(row=row, column=3).hyperlink:
         return "already on Main at row %d" % row
     if dry_run:
         return "would %s Main row %d" % ("link" if existing else "add", row)
 
     if not existing:
-        label = profile["name"] if profile else t
-        if profile and profile.get("exchange"):
-            label = "%s (%s:%s)" % (label, profile["exchange"], t)
-        ws.cell(row=row, column=2, value=label)
+        ws.cell(row=row, column=2, value=profile["name"] if profile else t)
         ws.cell(row=row, column=3, value=t)
         if profile and profile.get("industry"):
             ws.cell(row=row, column=4, value=profile["industry"])
-    cell = ws.cell(row=row, column=2)
+    cell = ws.cell(row=row, column=3)
     cell.hyperlink = target
-    if style_from is not None:
-        cell._style = copy(style_from._style)
+    if style_from is not None:                      # plain Company, linked Ticker
+        ws.cell(row=row, column=2)._style = copy(style_from[0]._style)
+        cell._style = copy(style_from[1]._style)
     xlsx_safe.save_workbook(wb, INDEX)
     return "%s Main row %d" % ("linked" if existing else "added", row)
 

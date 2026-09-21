@@ -26,8 +26,8 @@ Run from the repo root. Needs `openpyxl`.
 
 1. **Creates `companies/<TICKER>.xlsx`** from `base.xlsx`. Never overwrites an
    existing model. Dots in tickers become underscores — `BEP.UN` → `BEP_UN.xlsx`.
-2. **Adds the company to `portfolio.xlsx` `Main`** and hyperlinks the row to the
-   model. Name, exchange and industry come from EDGAR, so the row matches how
+2. **Adds the company to `portfolio.xlsx` `Main`** and hyperlinks the Ticker
+   cell to the model. Name and industry come from EDGAR, so the row matches how
    the company actually reports. If the ticker is already listed, the existing
    row is linked rather than duplicated.
 3. **Sets the header range to the company's public life** — back to its first
